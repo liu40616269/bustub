@@ -73,6 +73,31 @@ class BPlusTreeInternalPage : public BPlusTreePage {
    */
   auto ValueAt(int index) const -> ValueType;
 
+  auto Lookup(const KeyType &key, const KeyComparator &comparator) const -> ValueType;
+
+  void PopulateNewRoot(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value);
+
+  auto InsertNodeAfter(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value) -> int;
+
+  // 删除下标 index 对应的分隔 key 和 child；index 0 的最左 child 不能通过该接口删除。
+  void Remove(int index);
+
+  // 将当前 InternalPage 的后半部分移动到 recipient，并返回需要上推到父节点的分隔 key。
+  auto MoveHalfTo(BPlusTreeInternalPage *recipient) -> KeyType;
+
+  // 将新 child 与当前满页的已有项一起均分到当前页和 recipient，返回需要上推的分隔 key。
+  auto InsertAndSplit(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value,
+                      BPlusTreeInternalPage *recipient) -> KeyType;
+
+  // 从左兄弟借 child：将当前页最后一个 child 移到 recipient 最前面，并返回新的父分隔 key。
+  auto MoveLastToFrontOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key) -> KeyType;
+
+  // 从右兄弟借 child：将当前页第一个 child 移到 recipient 末尾，并返回新的父分隔 key。
+  auto MoveFirstToEndOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key) -> KeyType;
+
+  // 合并 InternalPage：通过父节点 middle_key 连接两页，并将当前右页全部追加到 recipient 左页。
+  void MoveAllTo(BPlusTreeInternalPage *recipient, const KeyType &middle_key);
+
   /**
    * @brief For test only, return a string representing all keys in
    * this internal page, formatted as "(key1,key2,key3,...)"

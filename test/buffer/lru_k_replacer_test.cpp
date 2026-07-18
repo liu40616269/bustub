@@ -95,4 +95,110 @@ TEST(LRUKReplacerTest, DISABLED_SampleTest) {
   ASSERT_EQ(false, lru_replacer.Evict(&value));
   ASSERT_EQ(0, lru_replacer.Size());
 }
+
+TEST(LRUKReplacerTest, EmptyTest) {
+  LRUKReplacer replacer(3, 2);
+  frame_id_t victim = -1;
+  EXPECT_EQ(replacer.Size(), 0);
+  EXPECT_FALSE(replacer.Evict(&victim));
+  EXPECT_EQ(replacer.Size(), 0);
+}
+
+TEST(LRUKReplacerTest, SetEvictableIdempotentTest) {
+  LRUKReplacer replacer(3, 2);
+  replacer.RecordAccess(0);
+  EXPECT_EQ(replacer.Size(), 0);
+  replacer.SetEvictable(0, true);
+  EXPECT_EQ(replacer.Size(), 1);
+  replacer.SetEvictable(0, true);
+  EXPECT_EQ(replacer.Size(), 1);
+  replacer.SetEvictable(0, false);
+  EXPECT_EQ(replacer.Size(), 0);
+  replacer.SetEvictable(0, false);
+  EXPECT_EQ(replacer.Size(), 0);
+}
+
+TEST(LRUKReplacerTest, NonEvictableTest) {
+  LRUKReplacer replacer(3, 2);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.SetEvictable(0, false);
+  replacer.SetEvictable(1, true);
+  frame_id_t victim = -1;
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 1);
+  EXPECT_EQ(replacer.Size(), 0);
+}
+
+TEST(LRUKReplacerTest, InfiniteDistanceLRUTest) {
+  LRUKReplacer replacer(5, 3);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.RecordAccess(2);
+  replacer.SetEvictable(0, true);
+  replacer.SetEvictable(1, true);
+  replacer.SetEvictable(2, true);
+  frame_id_t victim = -1;
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 0);
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 1);
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 2);
+}
+
+TEST(LRUKReplacerTest, FiniteDistanceTest) {
+  LRUKReplacer replacer(3, 2);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.SetEvictable(0, true);
+  replacer.SetEvictable(1, true);
+  frame_id_t victim = -1;
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 0);
+}
+
+TEST(LRUKReplacerTest, InfiniteBeforeFiniteTest) {
+  LRUKReplacer replacer(3, 2);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.SetEvictable(0, true);
+  replacer.SetEvictable(1, true);
+  frame_id_t victim = -1;
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 1);
+}
+
+TEST(LRUKReplacerTest, MoreThanKAccessesTest) {
+  LRUKReplacer replacer(3, 2);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(1);
+  replacer.RecordAccess(1);
+  replacer.RecordAccess(0);
+  replacer.SetEvictable(0, true);
+  replacer.SetEvictable(1, true);
+  frame_id_t victim = -1;
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 0);
+}
+
+TEST(LRUKReplacerTest, EvictionClearsHistoryTest) {
+  LRUKReplacer replacer(2, 2);
+  replacer.RecordAccess(0);
+  replacer.RecordAccess(0);
+  replacer.SetEvictable(0, true);
+  frame_id_t victim = -1;
+  ASSERT_TRUE(replacer.Evict(&victim));
+  ASSERT_EQ(victim, 0);
+  ASSERT_EQ(replacer.Size(), 0);
+  replacer.RecordAccess(0);
+  replacer.SetEvictable(0, true);
+  EXPECT_EQ(replacer.Size(), 1);
+  EXPECT_TRUE(replacer.Evict(&victim));
+  EXPECT_EQ(victim, 0);
+}
 }  // namespace bustub

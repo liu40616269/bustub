@@ -173,6 +173,15 @@ class BufferPoolManager {
   auto DeletePage(page_id_t page_id) -> bool;
 
  private:
+  /**
+   * @brief 从空闲列表中取得一个未使用的 frame；若空闲列表为空，则通过 replacer 淘汰一个 frame。
+   *
+   * 如果选中的 frame 保存着脏页，先将其写回磁盘；随后删除旧的页表映射并重置 frame，供调用者安装新页。
+   * 调用本方法前必须持有 latch_。
+   *
+   * @return 可复用的 frame id；如果所有 frame 都处于 pinned 状态，则返回 INVALID_PAGE_ID
+   */
+  auto TakeFrame() -> frame_id_t;
   /** Number of pages in the buffer pool. */
   const size_t pool_size_;
   /** The next page id to be allocated  */

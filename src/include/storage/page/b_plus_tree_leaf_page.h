@@ -58,6 +58,34 @@ class BPlusTreeLeafPage : public BPlusTreePage {
   auto GetNextPageId() const -> page_id_t;
   void SetNextPageId(page_id_t next_page_id);
   auto KeyAt(int index) const -> KeyType;
+  auto ValueAt(int index) const -> ValueType;
+
+  // 返回页面中指定 key/value 对的只读引用。引用直接指向 Page 内存，调用方必须保证页面 Guard 仍然存活。
+  auto GetItem(int index) const -> const MappingType &;
+
+  // 返回第一个大于等于 key 的数组下标。
+  auto KeyIndex(const KeyType &key, const KeyComparator &comparator) const -> int;
+
+  // 查找 key，找到后通过 value 返回 RID。
+  auto Lookup(const KeyType &key, ValueType *value, const KeyComparator &comparator) const -> bool;
+
+  // 插入唯一的 key/value，重复 key 返回 false。
+  auto Insert(const KeyType &key, const ValueType &value, const KeyComparator &comparator) -> bool;
+
+  // 删除指定 key；找到并删除返回 true，不存在返回 false。
+  auto Remove(const KeyType &key, const KeyComparator &comparator) -> bool;
+
+  // 将当前叶子节点的后半部分数据移动到 recipient。
+  void MoveHalfTo(BPlusTreeLeafPage *recipient);
+
+  // 将当前叶子的最后一条记录移动到 recipient 的最前面（从左兄弟借记录）。
+  void MoveLastToFrontOf(BPlusTreeLeafPage *recipient);
+
+  // 将当前叶子的第一条记录移动到 recipient 的末尾（从右兄弟借记录）。
+  void MoveFirstToEndOf(BPlusTreeLeafPage *recipient);
+
+  // 将当前叶子的全部记录追加到 recipient，并让 recipient 跳过当前页连接后继叶子。
+  void MoveAllTo(BPlusTreeLeafPage *recipient);
 
   /**
    * @brief for test only return a string representing all keys in

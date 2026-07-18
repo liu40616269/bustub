@@ -40,6 +40,8 @@ struct PrintableBPlusTree;
  */
 class Context {
  public:
+  ~Context() { ReleaseAll(); }
+
   // When you insert into / remove from the B+ tree, store the write guard of header page here.
   // Remember to drop the header page guard and set it to nullopt when you want to unlock all.
   std::optional<WritePageGuard> header_page_{std::nullopt};
@@ -54,6 +56,18 @@ class Context {
   std::deque<ReadPageGuard> read_set_;
 
   auto IsRootPage(page_id_t page_id) -> bool { return page_id == root_page_id_; }
+
+  // 一次性释放整条锁链时必须按 Header -> root -> ... -> leaf 的方向进行。
+  // 显式 pop_front 能保证顺序，不依赖 optional/deque 成员在析构阶段的默认销毁次序。
+  void ReleaseAll() {
+    header_page_.reset();
+    while (!write_set_.empty()) {
+      write_set_.pop_front();
+    }
+    while (!read_set_.empty()) {
+      read_set_.pop_front();
+    }
+  }
 };
 
 #define BPLUSTREE_TYPE BPlusTree<KeyType, ValueType, KeyComparator>
@@ -117,6 +131,25 @@ class BPlusTree {
   void RemoveFromFile(const std::string &file_name, Transaction *txn = nullptr);
 
  private:
+  // 判断页面对一次插入是否“安全”：操作完成后不会分裂，因此修改不会继续传播到父节点。
+  auto IsSafeForInsert(const BPlusTreePage *page) const -> bool;
+
+  // 判断页面对一次删除是否“安全”：操作完成后不会欠载；根页面还要单独考虑换根条件。
+  auto IsSafeForDelete(const BPlusTreePage *page, bool is_root) const -> bool;
+
+  // 当前子页面已经加锁且确认安全时，释放 Header 与所有祖先，只保留调用者手中的子页面锁。
+  void ReleaseAncestors(Context *ctx);
+
+  // 页面已从树结构摘除且其 guard 已释放后，尝试交给 BufferPoolManager 做物理回收。
+  void TryDeletePage(page_id_t page_id);
+
+  // 将节点分裂产生的 (旧节点, 分隔 key, 新右节点) 插入父节点；父节点已满时继续向上分裂。
+  auto InsertIntoParent(Context *ctx, page_id_t old_page_id, const KeyType &separator_key,
+                        page_id_t new_page_id) -> bool;
+
+  // ctx.write_set_ 末尾是删除 child 后可能欠载的 InternalPage；向上重分配、合并或收缩根。
+  void RebalanceInternalAfterDeletion(Context *ctx);
+
   /* Debug Routines for FREE!! */
   void ToGraph(page_id_t page_id, const BPlusTreePage *page, std::ofstream &out);
 
