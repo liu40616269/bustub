@@ -2,6 +2,7 @@
  * lock_manager_test.cpp
  */
 
+#include <atomic>
 #include <random>
 #include <thread>  // NOLINT
 
@@ -321,5 +322,132 @@ void AbortTest1() {
 }
 
 TEST(LockManagerTest, DISABLED_RowAbortTest1) { AbortTest1(); }  // NOLINT
+
+TEST(LockManagerAdditionalTest, Task1RulesAndRowUpgrade) {
+  LockManager lock_mgr{};
+  TransactionManager txn_mgr{&lock_mgr};
+  constexpr table_oid_t oid = 42;
+  const RID rid{7, 1};
+
+  auto *ru_txn = txn_mgr.Begin(nullptr, IsolationLevel::READ_UNCOMMITTED);
+  try {
+    static_cast<void>(lock_mgr.LockTable(ru_txn, LockManager::LockMode::SHARED, oid));
+    FAIL() << "READ_UNCOMMITTED must reject a shared lock";
+  } catch (TransactionAbortException &exception) {
+    EXPECT_EQ(exception.GetAbortReason(), AbortReason::LOCK_SHARED_ON_READ_UNCOMMITTED);
+  }
+  delete ru_txn;
+
+  auto *no_table_lock_txn = txn_mgr.Begin();
+  try {
+    static_cast<void>(lock_mgr.LockRow(no_table_lock_txn, LockManager::LockMode::SHARED, oid, rid));
+    FAIL() << "A row lock must be protected by an appropriate table lock";
+  } catch (TransactionAbortException &exception) {
+    EXPECT_EQ(exception.GetAbortReason(), AbortReason::TABLE_LOCK_NOT_PRESENT);
+  }
+  delete no_table_lock_txn;
+
+  auto *upgrade_txn = txn_mgr.Begin();
+  ASSERT_TRUE(lock_mgr.LockTable(upgrade_txn, LockManager::LockMode::INTENTION_EXCLUSIVE, oid));
+  ASSERT_TRUE(lock_mgr.LockRow(upgrade_txn, LockManager::LockMode::SHARED, oid, rid));
+  ASSERT_TRUE(lock_mgr.LockRow(upgrade_txn, LockManager::LockMode::EXCLUSIVE, oid, rid));
+  EXPECT_FALSE(upgrade_txn->IsRowSharedLocked(oid, rid));
+  EXPECT_TRUE(upgrade_txn->IsRowExclusiveLocked(oid, rid));
+
+  try {
+    static_cast<void>(lock_mgr.UnlockTable(upgrade_txn, oid));
+    FAIL() << "The table lock cannot be released before its row locks";
+  } catch (TransactionAbortException &exception) {
+    EXPECT_EQ(exception.GetAbortReason(), AbortReason::TABLE_UNLOCKED_BEFORE_UNLOCKING_ROWS);
+  }
+  txn_mgr.Abort(upgrade_txn);
+  delete upgrade_txn;
+}
+
+TEST(LockManagerAdditionalTest, Task1FifoAndUpgradePriority) {
+  LockManager lock_mgr{};
+  TransactionManager txn_mgr{&lock_mgr};
+  constexpr table_oid_t fifo_oid = 100;
+
+  auto *owner = txn_mgr.Begin();
+  auto *exclusive_waiter = txn_mgr.Begin();
+  auto *shared_waiter = txn_mgr.Begin();
+  ASSERT_TRUE(lock_mgr.LockTable(owner, LockManager::LockMode::SHARED, fifo_oid));
+
+  std::atomic<int> acquisition_order{0};
+  std::atomic<int> exclusive_order{0};
+  std::atomic<int> shared_order{0};
+
+  std::thread exclusive_thread([&] {
+    if (lock_mgr.LockTable(exclusive_waiter, LockManager::LockMode::EXCLUSIVE, fifo_oid)) {
+      exclusive_order = ++acquisition_order;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      static_cast<void>(lock_mgr.UnlockTable(exclusive_waiter, fifo_oid));
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  std::thread shared_thread([&] {
+    if (lock_mgr.LockTable(shared_waiter, LockManager::LockMode::SHARED, fifo_oid)) {
+      shared_order = ++acquisition_order;
+      static_cast<void>(lock_mgr.UnlockTable(shared_waiter, fifo_oid));
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(exclusive_order.load(), 0);
+  EXPECT_EQ(shared_order.load(), 0);
+  ASSERT_TRUE(lock_mgr.UnlockTable(owner, fifo_oid));
+  exclusive_thread.join();
+  shared_thread.join();
+  EXPECT_EQ(exclusive_order.load(), 1);
+  EXPECT_EQ(shared_order.load(), 2);
+
+  delete owner;
+  delete exclusive_waiter;
+  delete shared_waiter;
+
+  constexpr table_oid_t upgrade_oid = 101;
+  auto *upgrader = txn_mgr.Begin();
+  auto *conflicting_upgrader = txn_mgr.Begin();
+  auto *late_reader = txn_mgr.Begin();
+  ASSERT_TRUE(lock_mgr.LockTable(upgrader, LockManager::LockMode::SHARED, upgrade_oid));
+  ASSERT_TRUE(lock_mgr.LockTable(conflicting_upgrader, LockManager::LockMode::SHARED, upgrade_oid));
+
+  acquisition_order = 0;
+  std::atomic<int> upgrader_order{0};
+  std::atomic<int> reader_order{0};
+  std::thread upgrade_thread([&] {
+    if (lock_mgr.LockTable(upgrader, LockManager::LockMode::EXCLUSIVE, upgrade_oid)) {
+      upgrader_order = ++acquisition_order;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      static_cast<void>(lock_mgr.UnlockTable(upgrader, upgrade_oid));
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  std::thread reader_thread([&] {
+    if (lock_mgr.LockTable(late_reader, LockManager::LockMode::SHARED, upgrade_oid)) {
+      reader_order = ++acquisition_order;
+      static_cast<void>(lock_mgr.UnlockTable(late_reader, upgrade_oid));
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+  try {
+    static_cast<void>(lock_mgr.LockTable(conflicting_upgrader, LockManager::LockMode::EXCLUSIVE, upgrade_oid));
+    FAIL() << "Only one transaction may wait for an upgrade on a resource";
+  } catch (TransactionAbortException &exception) {
+    EXPECT_EQ(exception.GetAbortReason(), AbortReason::UPGRADE_CONFLICT);
+  }
+  txn_mgr.Abort(conflicting_upgrader);
+
+  upgrade_thread.join();
+  reader_thread.join();
+  EXPECT_EQ(upgrader_order.load(), 1);
+  EXPECT_EQ(reader_order.load(), 2);
+
+  delete upgrader;
+  delete conflicting_upgrader;
+  delete late_reader;
+}
 
 }  // namespace bustub

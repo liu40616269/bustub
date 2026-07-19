@@ -56,6 +56,31 @@ TEST(LockManagerDeadlockDetectionTest, DISABLED_EdgeTest) {
   }
 }
 
+TEST(LockManagerDeadlockDetectionTest, CycleApiTest) {
+  LockManager lock_mgr{};
+
+  // 构造 1 -> 7 -> 4 -> 1，牺牲者必须是环中事务 ID 最大的 7。
+  lock_mgr.AddEdge(1, 7);
+  lock_mgr.AddEdge(7, 4);
+  lock_mgr.AddEdge(4, 1);
+  lock_mgr.AddEdge(1, 7);  // 重复添加不应产生重复边。
+
+  txn_id_t victim = INVALID_TXN_ID;
+  EXPECT_TRUE(lock_mgr.HasCycle(&victim));
+  EXPECT_EQ(victim, 7);
+  EXPECT_EQ(lock_mgr.GetEdgeList().size(), 3);
+
+  // 删除任意一条环边后，图变为有向链，不应再报告死锁。
+  lock_mgr.RemoveEdge(7, 4);
+  EXPECT_FALSE(lock_mgr.HasCycle(&victim));
+  EXPECT_EQ(victim, INVALID_TXN_ID);
+
+  // 自环也是合法的有向环，牺牲者就是该事务自身。
+  lock_mgr.AddEdge(9, 9);
+  EXPECT_TRUE(lock_mgr.HasCycle(&victim));
+  EXPECT_EQ(victim, 9);
+}
+
 TEST(LockManagerDeadlockDetectionTest, DISABLED_BasicDeadlockDetectionTest) {
   LockManager lock_mgr{};
   TransactionManager txn_mgr{&lock_mgr};

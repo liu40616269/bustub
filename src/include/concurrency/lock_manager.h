@@ -13,10 +13,12 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>  // NOLINT
 #include <list>
 #include <memory>
-#include <mutex>  // NOLINT
+#include <mutex>   // NOLINT
+#include <thread>  // NOLINT
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -86,14 +88,15 @@ class LockManager {
   }
 
   ~LockManager() {
-    UnlockAll();
-
+    // 先停止后台检测线程，避免它与请求队列的析构清理并发访问同一批数据。
     enable_cycle_detection_ = false;
 
     if (cycle_detection_thread_ != nullptr) {
       cycle_detection_thread_->join();
       delete cycle_detection_thread_;
     }
+
+    UnlockAll();
   }
 
   /**
@@ -307,7 +310,8 @@ class LockManager {
    */
   auto RunCycleDetection() -> void;
 
-  TransactionManager *txn_manager_;
+  /** BusTubInstance 会在启动死锁检测前设置它；nullptr 表示当前尚未连接事务注册表。 */
+  TransactionManager *txn_manager_{nullptr};
 
  private:
   /** Spring 2023 */
@@ -333,8 +337,10 @@ class LockManager {
   /** Coordination */
   std::mutex row_lock_map_latch_;
 
-  std::atomic<bool> enable_cycle_detection_;
-  std::thread *cycle_detection_thread_;
+  /** 控制后台死锁检测循环；显式初始化保证默认构造的 LockManager 可以安全析构。 */
+  std::atomic<bool> enable_cycle_detection_{false};
+  /** LockManager 独占的后台线程；调用 StartDeadlockDetection() 前保持 nullptr。 */
+  std::thread *cycle_detection_thread_{nullptr};
   /** Waits-for graph representation. */
   std::unordered_map<txn_id_t, std::vector<txn_id_t>> waits_for_;
   std::mutex waits_for_latch_;
