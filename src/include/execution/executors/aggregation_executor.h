@@ -72,12 +72,63 @@ class SimpleAggregationHashTable {
    */
   void CombineAggregateValues(AggregateValue *result, const AggregateValue &input) {
     for (uint32_t i = 0; i < agg_exprs_.size(); i++) {
+      // current 是该分组目前保存的聚合状态。
+      // incoming 是当前输入 Tuple 计算出的聚合表达式值。
+      auto &current = result->aggregates_[i];
+      const auto &incoming = input.aggregates_[i];
+
       switch (agg_types_[i]) {
         case AggregationType::CountStarAggregate:
+          // COUNT(*)统计输入行数
+          // 初始值是0，每处理一行就增加1
+          current = current.Add(ValueFactory::GetIntegerValue(1));
+          break;
+
         case AggregationType::CountAggregate:
+          // COUNT(expr)只统计expr不为NULL的行
+          if (!incoming.IsNull()) {
+            // 本项目将COUNT(expr)的初始值设为NULL
+            // 遇到第一个非NULL输入时，将结果初始化为1
+            if (current.IsNull()) {
+              current = ValueFactory::GetIntegerValue(1);
+            } else {
+              current = current.Add(ValueFactory::GetIntegerValue(1));
+            }
+          }
+          break;
+
         case AggregationType::SumAggregate:
+          // SUM(expr)忽略NULL
+          if (!incoming.IsNull()) {
+            // 第一个非NULL输入直接成为SUM的初始值
+            if (current.IsNull()) {
+              current = incoming;
+            } else {
+              current = current.Add(incoming);
+            }
+          }
+          break;
+
         case AggregationType::MinAggregate:
+          // MIN(expr)忽略NULL
+          if (!incoming.IsNull()) {
+            // 若当前结果为NULL，说明这是第一个有效输入
+            // 否则只有incoming更小时才替换
+            if (current.IsNull() || incoming.CompareLessThan(current) == CmpBool::CmpTrue) {
+              current = incoming;
+            }
+          }
+          break;
+
         case AggregationType::MaxAggregate:
+          // MAX(expr)忽略NULL
+          if (!incoming.IsNull()) {
+            // 当前结果为NULL，说明这是第一个有效输入
+            // 否则只有incoming更大时才替换
+            if (current.IsNull() || incoming.CompareGreaterThan(current) == CmpBool::CmpTrue) {
+              current = incoming;
+            }
+          }
           break;
       }
     }
@@ -93,6 +144,16 @@ class SimpleAggregationHashTable {
       ht_.insert({agg_key, GenerateInitialAggregateValue()});
     }
     CombineAggregateValues(&ht_[agg_key], agg_val);
+  }
+
+  /**
+   * 为指定分组直接创建初始聚合状态，但不合并任何输入 Tuple。
+   * 无 GROUP BY 的聚合只有一个空 Key 全局分组；提前创建它可以保证空输入仍输出
+   * COUNT(*)=0，以及 SUM/MIN/MAX/COUNT(expr)=NULL。
+   * @param agg_key 需要创建初始状态的分组 Key
+   */
+  void InsertInitialAggregateValue(const AggregateKey &agg_key) {
+    ht_.insert({agg_key, GenerateInitialAggregateValue()});
   }
 
   /**
@@ -200,9 +261,9 @@ class AggregationExecutor : public AbstractExecutor {
   const AggregationPlanNode *plan_;
   /** The child executor that produces tuples over which the aggregation is computed */
   std::unique_ptr<AbstractExecutor> child_;
-  /** Simple aggregation hash table */
-  // TODO(Student): Uncomment SimpleAggregationHashTable aht_;
-  /** Simple aggregation hash table iterator */
-  // TODO(Student): Uncomment SimpleAggregationHashTable::Iterator aht_iterator_;
+  /** 聚合哈希表：AggregateKey（GROUP BY 值）到 AggregateValue（聚合状态）的映射 */
+  SimpleAggregationHashTable aht_;
+  /** 聚合结果迭代器：Next() 使用它逐组输出哈希表中的最终结果 */
+  SimpleAggregationHashTable::Iterator aht_iterator_;
 };
 }  // namespace bustub

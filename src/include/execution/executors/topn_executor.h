@@ -12,7 +12,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
+#include <queue>
 #include <utility>
 #include <vector>
 
@@ -59,9 +61,41 @@ class TopNExecutor : public AbstractExecutor {
   auto GetNumInHeap() -> size_t;
 
  private:
+  /** 堆和最终输出都需要同时保存 Tuple 及 child 产生的 RID。 */
+  struct TopNEntry {
+    Tuple tuple_;
+    RID rid_;
+  };
+
+  /**
+   * 判断 left 是否应排在 right 前面。
+   * priority_queue 使用该比较器后，堆顶会成为当前 Top N 中“最差”的记录。
+   */
+  class TopNComparator {
+   public:
+    explicit TopNComparator(const TopNPlanNode *plan) : plan_(plan) {}
+
+    auto operator()(const TopNEntry &left, const TopNEntry &right) const -> bool;
+
+   private:
+    const TopNPlanNode *plan_;
+  };
+
+  using TopNHeap = std::priority_queue<TopNEntry, std::vector<TopNEntry>, TopNComparator>;
+
   /** The topn plan node to be executed */
   const TopNPlanNode *plan_;
+
   /** The child executor from which tuples are obtained */
   std::unique_ptr<AbstractExecutor> child_executor_;
+
+  /** 始终只保留当前最优的 N 条记录，堆顶是其中最差的一条。 */
+  TopNHeap top_entries_;
+
+  /** 堆构建完成后，将其中记录整理成最终 ORDER BY 顺序供 Next() 输出。 */
+  std::vector<TopNEntry> output_entries_;
+
+  /** 下一次 Next() 应返回 output_entries_ 中的下标。 */
+  std::size_t next_tuple_idx_{0};
 };
 }  // namespace bustub

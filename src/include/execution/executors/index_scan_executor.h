@@ -18,6 +18,7 @@
 #include "execution/executor_context.h"
 #include "execution/executors/abstract_executor.h"
 #include "execution/plans/index_scan_plan.h"
+#include "storage/index/b_plus_tree_index.h"
 #include "storage/table/tuple.h"
 
 namespace bustub {
@@ -44,5 +45,17 @@ class IndexScanExecutor : public AbstractExecutor {
  private:
   /** The index scan plan node to be executed. */
   const IndexScanPlanNode *plan_;
+
+  /** Catalog 中的索引元数据，生命周期由 Catalog 管理 */
+  IndexInfo *index_info_{nullptr};
+
+  /** 索引所属表的元数据，生命周期由 Catalog 管理 */
+  TableInfo *table_info_{nullptr};
+
+  /** 具体的 B+ 树索引对象；Catalog 仍然拥有它 */
+  BPlusTreeIndexForTwoIntegerColumn *tree_{nullptr};
+
+  /** 当前 B+ 树叶子扫描位置；迭代器内部通过 PageGuard 管理页面 */
+  BPlusTreeIndexIteratorForTwoIntegerColumn iterator_;
 };
 }  // namespace bustub

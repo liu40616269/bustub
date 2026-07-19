@@ -57,6 +57,15 @@ class InsertExecutor : public AbstractExecutor {
  private:
   /** The insert plan node to be executed*/
   const InsertPlanNode *plan_;
+
+  /** 目标表信息，生命周期由 Catalog 管理 */
+  TableInfo *table_info_;
+
+  /** 为 Insert 提供待插入 Tuple 的子 Executor */
+  std::unique_ptr<AbstractExecutor> child_executor_;
+
+  /** 保证插入操作和影响行数只产生一次 */
+  bool executed_{false};
 };
 
 }  // namespace bustub

@@ -12,7 +12,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "execution/executor_context.h"
@@ -50,7 +52,19 @@ class SortExecutor : public AbstractExecutor {
   auto GetOutputSchema() const -> const Schema & override { return plan_->OutputSchema(); }
 
  private:
+  /** 按 Plan 中的多列 ORDER BY 规则判断 left 是否应排在 right 前面。 */
+  auto CompareTuples(const Tuple &left, const Tuple &right) const -> bool;
+
   /** The sort plan node to be executed */
   const SortPlanNode *plan_;
+
+  /** Sort 的 child Executor；Init() 会一次性消费其全部输入。 */
+  std::unique_ptr<AbstractExecutor> child_executor_;
+
+  /** 排序时同时保存 Tuple 与 child 返回的 RID，Next() 再将二者原样向上传递。 */
+  std::vector<std::pair<Tuple, RID>> sorted_entries_;
+
+  /** 下一次 Next() 应返回 sorted_entries_ 中的下标。 */
+  std::size_t next_tuple_idx_{0};
 };
 }  // namespace bustub

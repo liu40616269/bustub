@@ -64,5 +64,7 @@ class UpdateExecutor : public AbstractExecutor {
   const TableInfo *table_info_;
   /** The child executor to obtain value from */
   std::unique_ptr<AbstractExecutor> child_executor_;
+  /** 保证一次执行只更新一次，并且只返回一行受影响记录数 */
+  bool executed_{false};
 };
 }  // namespace bustub
