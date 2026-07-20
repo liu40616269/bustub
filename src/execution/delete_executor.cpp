@@ -51,9 +51,17 @@ auto DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
 
   // child 只返回满足 DELETE 的 WHERE 条件的记录；没有 WHERE 时则返回表中的全部有效记录。
   while (child_executor_->Next(&old_tuple, &old_rid)) {
-    // BusTub 在这里采用逻辑删除：物理 Slot 仍然存在，但 is_deleted_=true。
-    // 之后 SeqScan 读取到这条记录时会将其跳过。
-    table_info_->table_->UpdateTupleMeta(TupleMeta{INVALID_TXN_ID, INVALID_TXN_ID, true}, old_rid);
+    // DeleteExecutor 不再重复申请锁：ExecutorContext::IsDelete() 会让下层 SeqScan 在返回 old_rid 前
+    // 已经取得目标表 IX 和该行 X。这里直接执行逻辑删除，并且保留 TupleMeta 中除删除标记外的字段。
+    // X 锁不会在此释放，它必须一直保留到 Commit/Abort，防止其他 RR/RC 事务看到未提交删除。
+    auto old_meta = table_info_->table_->GetTupleMeta(old_rid);
+    old_meta.is_deleted_ = true;
+    table_info_->table_->UpdateTupleMeta(old_meta, old_rid);
+
+    // 逻辑删除已经立即写入 TableHeap，因此同步记录到 write set。若事务中止，Abort() 会按相反顺序
+    // 处理记录，并把当前 is_deleted_=true 反转回 false，使这条旧记录重新可见。
+    exec_ctx_->GetTransaction()->AppendTableWriteRecord(
+        TableWriteRecord{plan_->TableOid(), old_rid, table_info_->table_.get()});
 
     // 每个索引只保存“索引 Key -> RID”。记录被删除后，必须用删除前的完整 Tuple
     // 提取对应索引 Key，再删除 old_key -> old_rid 映射，避免 IndexScan 找到失效记录。

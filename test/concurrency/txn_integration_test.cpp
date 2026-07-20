@@ -32,6 +32,28 @@ void CommitTest1() {
 // NOLINTNEXTLINE
 TEST(CommitAbortTest, DISABLED_CommitTestA) { CommitTest1(); }
 
+TEST(CommitAbortTest, AbortRestoresInsertAndDeleteTest) {
+  auto db = GetDbForCommitAbortTest("AbortRestoresInsertAndDeleteTest");
+
+  // INSERT 会立刻在 TableHeap 中创建可见 Slot；Abort 必须利用 write set 把它重新标记为 deleted。
+  auto insert_txn = Begin(*db, IsolationLevel::REPEATABLE_READ);
+  Insert(insert_txn, *db, 1);
+  Abort(*db, insert_txn);
+
+  auto reader_after_insert_abort = Begin(*db, IsolationLevel::REPEATABLE_READ);
+  Scan(reader_after_insert_abort, *db, {233, 234});
+  Commit(*db, reader_after_insert_abort);
+
+  // DELETE 同样立即修改删除标记；Abort 必须执行相反操作，让原来的三条 233 记录重新可见。
+  auto delete_txn = Begin(*db, IsolationLevel::REPEATABLE_READ);
+  Delete(delete_txn, *db, 233);
+  Abort(*db, delete_txn);
+
+  auto reader_after_delete_abort = Begin(*db, IsolationLevel::REPEATABLE_READ);
+  Scan(reader_after_delete_abort, *db, {233, 234});
+  Commit(*db, reader_after_delete_abort);
+}
+
 void Test1(IsolationLevel lvl) {
   // should scan changes of committed txn
   auto db = GetDbForVisibilityTest("Test1");

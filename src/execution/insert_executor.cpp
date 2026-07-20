@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include "common/exception.h"
 #include "execution/executors/insert_executor.h"
 #include "type/value_factory.h"
 
@@ -27,7 +28,25 @@ InsertExecutor::InsertExecutor(ExecutorContext *exec_ctx, const InsertPlanNode *
 }
 
 void InsertExecutor::Init() {
-  // 从头初始化待插入数据的生产者
+  auto *txn = exec_ctx_->GetTransaction();
+  const auto table_oid = plan_->TableOid();
+
+  // 插入一条记录前必须先在目标表上持有 IX（或更强的 SIX/X），这样后续为新 RID 获取行 X
+  // 才符合多粒度锁协议。事务可能在前一条 SQL 中已经持有更强锁，此时不能重复请求较弱的 IX。
+  const bool has_write_table_lock = txn->IsTableIntentionExclusiveLocked(table_oid) ||
+                                    txn->IsTableSharedIntentionExclusiveLocked(table_oid) ||
+                                    txn->IsTableExclusiveLocked(table_oid);
+  if (!has_write_table_lock) {
+    // 若事务已经持有整表 S，写意向应与 S 合并为 SIX；常规情况则直接请求 IX，或者把已有 IS 升级为 IX。
+    const auto requested_mode = txn->IsTableSharedLocked(table_oid) ? LockManager::LockMode::SHARED_INTENTION_EXCLUSIVE
+                                                                    : LockManager::LockMode::INTENTION_EXCLUSIVE;
+    if (!exec_ctx_->GetLockManager()->LockTable(txn, requested_mode, table_oid)) {
+      throw ExecutionException("InsertExecutor failed to acquire a table lock");
+    }
+  }
+
+  // 表锁准备好以后，再从头初始化待插入数据的生产者。对于普通 INSERT，child 通常是 ValuesExecutor；
+  // 对于 INSERT ... SELECT，child 也可能是一棵读取其他表的执行器树。
   child_executor_->Init();
 
   // 允许本轮执行产生一次插入结果
@@ -62,13 +81,21 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // InsertExecutor 自己不负责计算 VALUES、WHERE 或 SELECT 表达式，而是不断向 child
   // 拉取已经计算完成的 Tuple，直到 child->Next() 返回 false。
   while (child_executor_->Next(&child_tuple, &child_rid)) {
-    // 先把完整 Tuple 写入目标表的 TableHeap。
-    // 两个 INVALID_TXN_ID 在 Project 3 中无需参与事务可见性判断；is_deleted_=false 表示
-    // 这是一条正常、未删除的新记录。InsertTuple 返回它在目标表中的全新物理位置。
-    auto inserted_rid = table_info_->table_->InsertTuple(TupleMeta{INVALID_TXN_ID, INVALID_TXN_ID, false}, child_tuple);
+    // 先把完整 Tuple 写入目标表的 TableHeap。Task 3 需要额外传入 LockManager、Transaction 和表 OID：
+    // TableHeap 在分配出新 RID 后会立刻为它申请行 X，从而让“记录出现”和“写事务拥有该行锁”关联起来。
+    // 新行的 X 锁会一直保留到 Commit/Abort，其他 RR/RC 事务在读取它时必须等待本事务结束。
+    auto inserted_rid =
+        table_info_->table_->InsertTuple(TupleMeta{INVALID_TXN_ID, INVALID_TXN_ID, false}, child_tuple,
+                                         exec_ctx_->GetLockManager(), exec_ctx_->GetTransaction(), plan_->TableOid());
 
     // 只有获得目标表中的新 RID 后，才能建立正确的“索引键 -> 目标记录位置”映射。
     BUSTUB_ASSERT(inserted_rid.has_value(), "Failed to insert tuple");
+
+    // TableHeap 的写入立即生效，所以必须把新 RID 放进事务 write set。若事务之后因死锁或显式 ABORT
+    // 失败，TransactionManager::Abort() 会逆序读取这些记录，把该新行重新标记为 deleted。
+    // Spring 2023 基础任务的 TableWriteRecord 不需要记录 WType：插入和删除都通过反转 is_deleted_ 撤销。
+    exec_ctx_->GetTransaction()->AppendTableWriteRecord(
+        TableWriteRecord{plan_->TableOid(), inserted_rid.value(), table_info_->table_.get()});
 
     // TableHeap 只保存完整记录；每个索引还需要单独保存自己的 Key 和新 RID。
     // 因此，每成功插入一条记录，都必须同步更新目标表上的所有索引。
